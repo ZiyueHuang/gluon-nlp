@@ -12,24 +12,23 @@ from gluonnlp.attention_cell import masked_softmax, MultiHeadAttentionCell
 mx.npx.set_np()
 
 
-def multi_head_sliding_window_dot_attn(F, query, key, value, dilation, mask, w,
+def multi_head_sliding_window_dot_attn(F, query, key, value, dilation, w,
                                        symmetric=True, dtype=np.float32):
-    # mask shape  (batch_size, seq_length, 1, seq_length) or
-    #             (batch_size, seq_length, num_heads, seq_length)
-
     # 1. Calculate the attention weights
     # scores shape  (batch_size, seq_length, num_heads, w + w + 1) if symmetric else
     #               (batch_size, seq_length, num_heads, w + 1)
-    scores = F.my_diag_mm(query.as_nd_ndarray(), key.as_nd_ndarray(),
-                          dilation.as_nd_ndarray(), w=w,
-                          diagonal_lhs=False, transpose_lhs=False,
-                          symmetric=symmetric).as_np_ndarray()
+    scores = F.sw_atten_score(query.as_nd_ndarray(), key.as_nd_ndarray(),
+                              dilation.as_nd_ndarray(), w=w,
+                              symmetric=symmetric).as_np_ndarray()
+    # mask shape  (batch_size, seq_length, num_heads, seq_length)
+    mask = F.mask_like(scores.as_nd_ndarray(), dilation.as_nd_ndarray(), w=w,
+                       symmetric=symmetric).as_np_ndarray()
     attn_weights = masked_softmax(F, scores, mask, dtype=dtype)
     # 2. Calculate the context vector
     # (batch_size, seq_length, num_heads, num_head_units)
-    context_vec = F.my_diag_mm(attn_weights.as_nd_ndarray(), value.as_nd_ndarray(),
-                               dilation.as_nd_ndarray(), w=w, diagonal_lhs=True,
-                               transpose_lhs=False, symmetric=symmetric).as_np_ndarray()
+    context_vec = F.sw_atten_context(attn_weights.as_nd_ndarray(), value.as_nd_ndarray(),
+                                     dilation.as_nd_ndarray(), w=w,
+                                     symmetric=symmetric).as_np_ndarray()
     # (batch_size, seq_length, num_units)
     context_vec = F.npx.reshape(context_vec, (-2, -2, -1))
 
@@ -64,9 +63,9 @@ class MultiHeadSlidingWindowAttentionCell(HybridBlock):
     def layout(self):
         return self._layout
 
-    def hybrid_forward(self, F, query, key, value, dilation, mask):
+    def hybrid_forward(self, F, query, key, value, dilation):
         return multi_head_sliding_window_dot_attn(F, query=query, key=key, value=value,
-                                                  dilation=dilation, mask=mask, w=self._w,
+                                                  dilation=dilation, w=self._w,
                                                   symmetric=self._symmetric,
                                                   dtype=self._dtype)
 
@@ -132,12 +131,9 @@ def test_multi_head_sliding_window_dot_attention_cell(batch_size, seq_length, nu
     value.grad[:] = 0
 
     dilation = mx.np.ones((num_heads,), dtype=np.int64, ctx=mx.gpu(0))
-    mask_np = gen_sliding_window_mask_diag(batch_size, seq_length, w, w_right)
-    mask = mx.np.array(mask_np, ctx=mx.gpu(0), dtype=np.float32)
-    mask = mx.np.expand_dims(mask, axis=2)
 
     with mx.autograd.record():
-        sw_out, [score, attn_weights] = sw_attn_cell(query, key, value, dilation, mask)
+        sw_out, [score, attn_weights] = sw_attn_cell(query, key, value, dilation)
         sw_out.backward()
 
     sw_out_np = sw_out.asnumpy()
@@ -166,5 +162,6 @@ test_multi_head_sliding_window_dot_attention_cell(2, 8, 2, 3, 10, True)
 test_multi_head_sliding_window_dot_attention_cell(2, 8, 2, 3, 10, False)
 test_multi_head_sliding_window_dot_attention_cell(2, 8, 2, 3, 2, True)
 test_multi_head_sliding_window_dot_attention_cell(2, 8, 2, 3, 2, False)
+
 
 
