@@ -20,11 +20,17 @@ import numpy as np
 import mxnet as mx
 from mxnet.gluon.block import HybridBlock
 from mxnet.gluon import nn
-from .op import l2_normalize
+from .op import l2_normalize, select_vectors_by_position, update_vectors_by_position
 from .layers import SinusoidalPositionalEmbedding,\
                     BucketPositionalEmbedding,\
                     LearnedPositionalEmbedding
 from typing import Optional
+
+import os
+
+if (os.name=='posix'):
+    path = os.path.abspath('libdiag_mm_lib.so')
+    mx.library.load(path)
 
 
 # TODO(sxjscience)
@@ -668,6 +674,92 @@ class MultiHeadAttentionCell(HybridBlock):
                         layout=self._layout,
                         use_einsum=self._use_einsum,
                         dtype=self._dtype)
+
+
+class MultiHeadSlidingWindowAttentionCell(HybridBlock):
+    def __init__(self, w, symmetric=True, query_units=None, num_heads=None,
+                 attention_dropout=0.0, scaled: bool = True, normalized: bool = False,
+                 eps: float = 1E-6, dtype='float32', layout='NTK'):
+        super().__init__()
+        self._query_units = query_units
+        self._w = w
+        self._symmetric = symmetric
+        self._num_heads = num_heads
+        self._attention_dropout = attention_dropout
+        self._scaled = scaled
+        self._normalized = normalized
+        self._eps = eps
+        self._dtype = dtype
+        assert(layout == 'NTK')
+        self._layout = layout
+        if self._query_units is not None:
+            assert self._num_heads is not None
+            assert self._query_units % self._num_heads == 0,\
+                'The units must be divisible by the number of heads.'
+            self._query_head_units = self._query_units // self._num_heads
+        else:
+            self._query_head_units = None
+
+    @property
+    def layout(self):
+        return self._layout
+
+    def hybrid_forward(self, F, query, key, value, dilation, valid_length):
+        query = query / math.sqrt(self._query_head_units)
+        # 1. Calculate the attention weights
+        # scores shape  (batch_size, seq_length, num_heads, w + w + 1) if symmetric else
+        #               (batch_size, seq_length, num_heads, w + 1)
+        sw_scores = F.sw_atten_score(query.as_nd_ndarray(), key.as_nd_ndarray(),
+                                     dilation.as_nd_ndarray(), w=self._w,
+                                     symmetric=self._symmetric).as_np_ndarray()
+        #global_tokens = F.np.zeros((batch_size, 1), ctx=mx.gpu(0))
+        global_tokens = F.np.expand_dims(F.np.zeros_like(valid_length), axis=1)
+        # (batch_size, 1, num_heads, num_head_units)
+        global_token_keys = select_vectors_by_position(F, key, global_tokens)
+        # (batch_size, seq_length, num_heads, 1)
+        l2g_scores = F.npx.batch_dot(F.np.swapaxes(query, 1, 2),
+                                     F.np.swapaxes(global_token_keys, 1, 2),
+                                     transpose_b=True).transpose((0, 2, 1, 3))
+        scores = F.np.concatenate([sw_scores, l2g_scores], axis=-1)
+        # mask shape  (batch_size, seq_length, num_heads, seq_length)
+        mask = F.mask_like(sw_scores.as_nd_ndarray(), dilation.as_nd_ndarray(),
+                           valid_length.astype(np.int64).as_nd_ndarray(), w=self._w,
+                           symmetric=self._symmetric).as_np_ndarray()
+
+        attn_weights = masked_softmax(F, scores, mask, dtype=self._dtype)
+        attn_weights = F.npx.dropout(attn_weights, p=self._attention_dropout)
+
+        sw_attn_weights, l2g_attn_weights = F.np.split(attn_weights, [self._w + self._w + 1, ], axis=-1)
+
+        # (batch_size, 1, num_heads, num_head_units)
+        global_token_values = select_vectors_by_position(F, value, global_tokens)
+        # (batch_size, seq_length, num_heads, num_head_units)
+        l2g_context_vec = F.npx.batch_dot(F.np.swapaxes(l2g_attn_weights, 1, 2),
+                                          F.np.swapaxes(global_token_values, 1, 2)).transpose((0, 2, 1, 3))
+        # 2. Calculate the context vector
+        # (batch_size, seq_length, num_heads, num_head_units)
+        context_vec = l2g_context_vec + F.sw_atten_context(sw_attn_weights.as_nd_ndarray(), value.as_nd_ndarray(),
+                                            dilation.as_nd_ndarray(), w=self._w,
+                                            symmetric=self._symmetric).as_np_ndarray()
+
+
+        # (batch_size, 1, num_heads, num_head_units)
+        global_token_querys = select_vectors_by_position(F, query, global_tokens)
+        # (batch_size, num_heads, 1, seq_length)
+        g2l_scores = F.npx.batch_dot(F.np.swapaxes(global_token_querys, 1, 2),
+                                     F.np.swapaxes(key, 1, 2),
+                                     transpose_b=True)
+        g2l_atten_weights = F.npx.softmax(g2l_scores, axis=-1)
+        g2l_atten_weights = F.npx.dropout(g2l_atten_weights, p=self._attention_dropout)
+        # (batch_size, 1, num_heads, num_head_units)
+        g2l_context_vec = F.npx.batch_dot(g2l_atten_weights,
+                                          F.np.swapaxes(value, 1, 2)).transpose((0, 2, 1, 3))
+        context_vec = update_vectors_by_position(F, context_vec, g2l_context_vec, global_tokens)
+
+        # (batch_size, seq_length, num_units)
+        context_vec = F.npx.reshape(context_vec, (-2, -2, -1))
+
+        return context_vec, [None, None]
 
 
 class RelAttentionScoreCell(HybridBlock):

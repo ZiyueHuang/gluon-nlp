@@ -249,7 +249,7 @@ class BertTransformer(HybridBlock):
     def layout(self):
         return self._layout
 
-    def hybrid_forward(self, F, data, valid_length):
+    def hybrid_forward(self, F, data, valid_length, dilation):
         """
         Generate the representation given the inputs.
 
@@ -279,14 +279,15 @@ class BertTransformer(HybridBlock):
         else:
             time_axis, batch_axis = 0, 1
         # 1. Embed the data
-        attn_mask = gen_self_attn_mask(F, data, valid_length, dtype=self._dtype,
-                                       attn_type='full', layout=self.layout)
+        #attn_mask = gen_self_attn_mask(F, data, valid_length, dtype=self._dtype,
+        #                               attn_type='full', layout=self.layout)
         out = data
         all_encodings_outputs = []
         additional_outputs = []
         for layer_idx in range(self._num_layers):
             layer = self.all_layers[layer_idx]
-            out, attention_weights = layer(out, attn_mask)
+            #out, attention_weights = layer(out, attn_mask)
+            out, attention_weights = layer(out, valid_length, dilation)
             # out : [batch_size, seq_len, units] or [seq_len, batch_size, units]
             # attention_weights : [batch_size, num_heads, seq_len, seq_len]
             if self._output_all_encodings:
@@ -394,7 +395,7 @@ class BertModel(HybridBlock):
     def layout(self):
         return self._layout
 
-    def hybrid_forward(self, F, inputs, token_types, valid_length):
+    def hybrid_forward(self, F, inputs, token_types, valid_length, dilation):
         # pylint: disable=arguments-differ
         """Generate the representation given the inputs.
 
@@ -436,10 +437,10 @@ class BertModel(HybridBlock):
         if self._compute_layout != self._layout:
             # Swap the axes if the compute_layout and layout mismatch
             contextual_embeddings, additional_outputs = self.encoder(F.np.swapaxes(prev_out, 0, 1),
-                                                                     valid_length)
+                                                                     valid_length, dilation)
             contextual_embeddings = F.np.swapaxes(contextual_embeddings, 0, 1)
         else:
-            contextual_embeddings, additional_outputs = self.encoder(prev_out, valid_length)
+            contextual_embeddings, additional_outputs = self.encoder(prev_out, valid_length, dilation)
         outputs.append(contextual_embeddings)
         if self.use_pooler:
             pooled_out = self.apply_pooling(contextual_embeddings)
@@ -705,7 +706,7 @@ class BertForPretrain(HybridBlock):
         return self.backbone_model.layout
 
     def hybrid_forward(self, F, inputs, token_types, valid_length,
-                       masked_positions):
+                       masked_positions, dilation):
         """Generate the representation given the inputs.
 
         This is used in training or fine-tuning a bert model.
@@ -747,7 +748,7 @@ class BertForPretrain(HybridBlock):
         mlm_scores :
             Shape (batch_size, num_masked_positions, vocab_size)
         """
-        contextual_embeddings, pooled_out = self.backbone_model(inputs, token_types, valid_length)
+        contextual_embeddings, pooled_out = self.backbone_model(inputs, token_types, valid_length, dilation)
         nsp_score = self.nsp_classifier(pooled_out)
         if self.layout == 'NT':
             mlm_features = select_vectors_by_position(F, contextual_embeddings, masked_positions)
