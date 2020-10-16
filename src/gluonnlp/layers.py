@@ -620,16 +620,30 @@ class PositionwiseFFN(HybridBlock):
             ('dtype', self._dtype)
         ])
         self.dropout_layer = nn.Dropout(dropout)
-        self.activation_dropout_layer = nn.Dropout(activation_dropout)
-        self.ffn_1 = nn.Dense(units=hidden_size,
+        self.activation_dropout_layer_1 = nn.Dropout(activation_dropout)
+        self.activation_dropout_layer_2 = nn.Dropout(activation_dropout)
+        self.ffn_1 = nn.Dense(units=units,
                               in_units=units,
                               flatten=False,
                               weight_initializer=weight_initializer,
                               bias_initializer=bias_initializer,
                               dtype=dtype)
-        self.activation = get_activation(activation)
+        self.activation_1 = get_activation(activation)
+        self.activation_2 = get_activation(activation)
         self.ffn_2 = nn.Dense(units=units,
-                              in_units=hidden_size,
+                              in_units=units,
+                              flatten=False,
+                              weight_initializer=weight_initializer,
+                              bias_initializer=bias_initializer,
+                              dtype=dtype)
+        self.ffn_3 = nn.Dense(units=units,
+                              in_units=units,
+                              flatten=False,
+                              weight_initializer=weight_initializer,
+                              bias_initializer=bias_initializer,
+                              dtype=dtype)
+        self.ffn_4 = nn.Dense(units=units,
+                              in_units=units,
                               flatten=False,
                               weight_initializer=weight_initializer,
                               bias_initializer=bias_initializer,
@@ -655,10 +669,14 @@ class PositionwiseFFN(HybridBlock):
         """
         if self._pre_norm:
             data = self.layer_norm(data)
-        out = self.activation(self.ffn_1(data))
-        out = self.activation_dropout_layer(out)
-        out = self.ffn_2(out)
-        out = self.dropout_layer(out)
+        out_1 = self.activation_1(self.ffn_1(data))
+        out_1 = self.activation_dropout_layer_1(out_1)
+        out_1 = self.activation_2(self.ffn_2(out_1))
+        out_1 = self.activation_dropout_layer_2(out_1)
+        out_1 = self.ffn_3(out_1)
+        out_2 = self.ffn_4(data)
+        out = self.dropout_layer(out_1 + out_2)
+        # residual connection
         out = out + data
         if not self._pre_norm:
             out = self.layer_norm(out)

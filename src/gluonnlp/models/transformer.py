@@ -6,7 +6,7 @@ from mxnet import use_np
 from mxnet.gluon import nn, HybridBlock
 from typing import Optional, Tuple, List
 from ..utils.registry import Registry
-from ..attention_cell import MultiHeadAttentionCell, gen_self_attn_mask, gen_mem_attn_mask
+from ..attention_cell import MultiHeadAttentionCell, MultiHeadSlidingWindowAttentionCell, gen_self_attn_mask, gen_mem_attn_mask
 from ..layers import PositionalEmbedding, PositionwiseFFN, InitializerType
 from ..utils.config import CfgNode as CN
 from ..sequence_sampler import BaseStepDecoder
@@ -199,6 +199,7 @@ class TransformerEncoderLayer(HybridBlock):
                                        bias_initializer=bias_initializer,
                                        dtype=self._dtype)
         attention_layout = 'NTK' if self._layout == 'NT' else 'TNK'
+        '''
         self.attention_cell = \
             MultiHeadAttentionCell(
                 query_units=self._units,
@@ -208,6 +209,10 @@ class TransformerEncoderLayer(HybridBlock):
                 dtype=self._dtype,
                 layout=attention_layout
             )
+        '''
+        self.attention_cell = MultiHeadSlidingWindowAttentionCell(w=32, query_units=self._units,
+                num_heads=self._num_heads, attention_dropout=self._attention_dropout_prob,
+                scaled=True, dtype=self._dtype, layout=attention_layout)
         self.layer_norm = nn.LayerNorm(epsilon=layer_norm_eps,
                                        in_channels=units)
         self.ffn = PositionwiseFFN(units=units,
@@ -225,7 +230,7 @@ class TransformerEncoderLayer(HybridBlock):
     def layout(self) -> str:
         return self._layout
 
-    def hybrid_forward(self, F, data, attn_mask):
+    def hybrid_forward(self, F, data, valid_length, dilation):
         """
 
         Parameters
@@ -255,7 +260,9 @@ class TransformerEncoderLayer(HybridBlock):
         query = F.npx.reshape(query, (-2, -2, self._num_heads, -1))
         key = F.npx.reshape(key, (-2, -2, self._num_heads, -1))
         value = F.npx.reshape(value, (-2, -2, self._num_heads, -1))
-        out, [_, attn_weight] = self.attention_cell(query, key, value, attn_mask)
+        #out, [_, attn_weight] = self.attention_cell(query, key, value, attn_mask)
+        #dilation = F.np.ones((self._num_heads,), ctx=query.ctx)
+        out, [_, attn_weight] = self.attention_cell(query, key, value, dilation, valid_length)
         out = self.attention_proj(out)
         out = self.dropout_layer(out)
         out = out + data
