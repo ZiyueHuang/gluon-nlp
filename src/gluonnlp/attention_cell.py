@@ -26,6 +26,12 @@ from .layers import SinusoidalPositionalEmbedding,\
                     LearnedPositionalEmbedding
 from typing import Optional
 
+import os
+
+if (os.name=='posix'):
+    path = os.path.abspath('libdiag_mm_lib.so')
+    mx.library.load(path)
+
 
 # TODO(sxjscience)
 #  We can optimize the whole function by writing a custom-op,
@@ -668,6 +674,59 @@ class MultiHeadAttentionCell(HybridBlock):
                         layout=self._layout,
                         use_einsum=self._use_einsum,
                         dtype=self._dtype)
+
+
+class MultiHeadSlidingWindowAttentionCell(HybridBlock):
+    def __init__(self, w, symmetric=True, query_units=None, num_heads=None,
+                 attention_dropout=0.0, scaled: bool = True, normalized: bool = False,
+                 eps: float = 1E-6, dtype='float32', layout='NTK'):
+        super().__init__()
+        self._query_units = query_units
+        self._w = w
+        self._symmetric = symmetric
+        self._num_heads = num_heads
+        self._attention_dropout = attention_dropout
+        self._scaled = scaled
+        self._normalized = normalized
+        self._eps = eps
+        self._dtype = dtype
+        assert(layout == 'NTK')
+        self._layout = layout
+        if self._query_units is not None:
+            assert self._num_heads is not None
+            assert self._query_units % self._num_heads == 0,\
+                'The units must be divisible by the number of heads.'
+            self._query_head_units = self._query_units // self._num_heads
+        else:
+            self._query_head_units = None
+
+    @property
+    def layout(self):
+        return self._layout
+
+    def hybrid_forward(self, F, query, key, value, dilation, valid_length):
+        query = query / math.sqrt(self._query_head_units)
+        # 1. Calculate the attention weights
+        # scores shape  (batch_size, seq_length, num_heads, w + w + 1) if symmetric else
+        #               (batch_size, seq_length, num_heads, w + 1)
+        scores = F.sw_atten_score(query.as_nd_ndarray(), key.as_nd_ndarray(),
+                                  dilation.as_nd_ndarray(), w=self._w,
+                                  symmetric=self._symmetric).as_np_ndarray()
+        # mask shape  (batch_size, seq_length, num_heads, seq_length)
+        mask = F.mask_like(scores.as_nd_ndarray(), dilation.as_nd_ndarray(),
+                           valid_length.astype(np.int64).as_nd_ndarray(), w=self._w,
+                           symmetric=self._symmetric).as_np_ndarray()
+        attn_weights = masked_softmax(F, scores, mask, dtype=self._dtype)
+        attn_weights = F.npx.dropout(attn_weights, p=self._attention_dropout)
+        # 2. Calculate the context vector
+        # (batch_size, seq_length, num_heads, num_head_units)
+        context_vec = F.sw_atten_context(attn_weights.as_nd_ndarray(), value.as_nd_ndarray(),
+                                         dilation.as_nd_ndarray(), w=self._w,
+                                         symmetric=self._symmetric).as_np_ndarray()
+        # (batch_size, seq_length, num_units)
+        context_vec = F.npx.reshape(context_vec, (-2, -2, -1))
+
+        return context_vec, [scores, attn_weights]
 
 
 class RelAttentionScoreCell(HybridBlock):

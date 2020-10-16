@@ -637,6 +637,20 @@ def init_comm(backend, gpus):
         is_master_node = rank == local_rank
         ctx_l = [mx.gpu(local_rank)]
         logging.info('GPU communication supported by horovod')
+    elif backend == 'byteps':
+        try:
+            import byteps.mxnet as bps
+        except ImportError:
+            logging.info('BytePS must be installed.')
+            sys.exit(1)
+        bps.init()
+        store = None
+        num_workers = bps.size()
+        rank = bps.rank()
+        local_rank = bps.local_rank()
+        is_master_node = rank == local_rank
+        ctx_l = [mx.gpu(local_rank)]
+        logging.info('GPU communication supported by BytePS')
     else:
         store = mx.kv.create(backend)
         num_workers = store.num_workers
@@ -656,7 +670,8 @@ def init_comm(backend, gpus):
 def get_mxnet_visible_ctx():
     """Get the visible contexts in MXNet.
 
-    - If GPU is available, it will return all the visible GPUs, which can be controlled via "CUDA_VISIBLE_DEVICES".
+    - If GPU is available, it will return all the visible GPUs, which can be controlled via
+    "CUDA_VISIBLE_DEVICES".
     - If no GPU is available, it will return the cpu device.
 
     Returns
